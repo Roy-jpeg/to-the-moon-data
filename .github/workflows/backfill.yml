@@ -1,0 +1,81 @@
+# Fills in the trailing year once, by hand (Actions > Backfill > Run workflow):
+# about 250 days of 9 to 16 GB each, spread over parallel jobs that each
+# stream their share and hand back only the small per-day files.
+name: Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      chunks:
+        description: Parallel jobs
+        default: '20'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prices
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.plan.outputs.groups }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: plan
+        run: echo "groups=$(python scripts/pending.py --chunks ${{ inputs.chunks }})" >> "$GITHUB_OUTPUT"
+
+  process:
+    needs: plan
+    if: needs.plan.outputs.groups != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        days: ${{ fromJSON(needs.plan.outputs.groups) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Process
+        run: |
+          for day in ${{ matrix.days }}; do
+            python scripts/process_day.py "$day" || echo "skipped $day"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: days-${{ strategy.job-index }}
+          path: data/days/
+          if-no-files-found: ignore
+
+  commit:
+    needs: process
+    if: always() && needs.process.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: days-*
+          path: data/days/
+          merge-multiple: true
+      - run: python scripts/build.py
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -m "Backfill: $(ls data/days | wc -l) trading days"
+          git pull --rebase
+          git push

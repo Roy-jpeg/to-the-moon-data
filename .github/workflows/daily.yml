@@ -1,0 +1,47 @@
+# Every hour from Tuesday to Saturday (UTC): IEX publishes a trading day's file
+# the next day, usually between 03:00 and 10:00 UTC but now and then later, so
+# the run keeps looking until it is there. A run with nothing new does nothing.
+name: Daily prices
+
+on:
+  schedule:
+    - cron: '17 * * * 2-6'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prices
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Process new trading days
+        run: |
+          days=$(python scripts/pending.py --recent 10 --limit 3)
+          echo "pending: ${days:-none}"
+          for day in $days; do
+            python scripts/process_day.py "$day" --bars
+          done
+
+      - name: Build the game's files
+        run: python scripts/build.py
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -m "Prices through $(python -c "import json; print(json.load(open('data/index.json'))['latest'])")"
+          git pull --rebase
+          git push
